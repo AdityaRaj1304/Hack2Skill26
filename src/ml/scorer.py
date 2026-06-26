@@ -159,12 +159,17 @@ def career_trajectory_score(candidate: dict) -> float:
         return 0.5  # No career history - weak signal
 
     # Check if entire career is consulting
-    companies = [h.get("company", "").lower() for h in history]
-    if all(
-        any(firm in company for firm in CONSULTING_FIRMS)
-        for company in companies
-    ):
-        score *= 0.2  # Near elimination
+    consulting_months = 0
+    total_months = 0
+    for role in history:
+        dur = role.get("duration_months", 0)
+        total_months += dur
+        company = role.get("company", "").lower()
+        if any(firm in company for firm in CONSULTING_FIRMS):
+            consulting_months += dur
+            
+    if total_months > 0 and (consulting_months / total_months) > 0.95:
+        score *= 0.1  # Heavy penalty for pure consultants
 
     # Calculate product company experience
     product_months = 0
@@ -274,36 +279,229 @@ def compute_final_score(
 
 
 # =============================================================================
-# Behavioral Multiplier Placeholder (Role 3 will replace this)
+# STEP 5F: Pure Researcher Penalty (Soft Filter)
+# =============================================================================
+
+def pure_researcher_penalty(candidate: dict) -> float:
+    """
+    Penalize candidates whose entire career is in academic/research roles
+    with no production engineering experience.
+    JD explicitly says: 'If you've spent your career in pure research
+    environments without any production deployment — we will not move forward.'
+    """
+    history = candidate.get("career_history", [])
+    if not history:
+        return 1.0  # No data — don't penalize
+
+    research_titles = {
+        "professor", "researcher", "research assistant", "research associate",
+        "research fellow", "postdoc", "postdoctoral", "phd", "doctoral",
+        "lab assistant", "teaching assistant", "academic",
+        "research scientist", "principal researcher",
+    }
+
+    research_count = 0
+    for role in history:
+        title = role.get("title", "").lower().strip()
+        if any(rt in title for rt in research_titles):
+            research_count += 1
+
+    # If ALL roles are research/academic -> heavy penalty
+    if research_count == len(history):
+        return 0.2
+    # If most roles are research -> moderate penalty
+    elif research_count > len(history) * 0.7:
+        return 0.5
+
+    return 1.0
+
+
+# =============================================================================
+# STEP 5G: Notice Period Penalty (Soft Filter)
+# =============================================================================
+
+def notice_period_penalty(candidate: dict) -> float:
+    """
+    Penalize candidates with high notice periods.
+    JD says: 'We'd love sub-30-day notice. 30+ day notice candidates
+    are still in scope but the bar gets higher.'
+    """
+    signals = candidate.get("redrob_signals", {})
+    notice_days = signals.get("notice_period_days", 0)
+
+    if notice_days <= 30:
+        return 1.0   # Ideal
+    elif notice_days <= 60:
+        return 0.85  # Acceptable
+    elif notice_days <= 90:
+        return 0.7   # High bar
+    else:
+        return 0.5   # Very long — significant penalty
+
+
+# =============================================================================
+# STEP 5H: Title Chaser Penalty (Soft Filter)
+# =============================================================================
+
+def title_chaser_penalty(candidate: dict) -> float:
+    """
+    Penalize candidates who switch companies too frequently.
+    JD says: 'If your career trajectory shows you optimizing for titles
+    by switching companies every 1.5 years, we're not a fit.'
+    """
+    history = candidate.get("career_history", [])
+    yoe = candidate.get("profile", {}).get("years_of_experience", 0)
+
+    if not history or yoe < 3 or len(history) < 2:
+        return 1.0  # Not enough data or too junior to judge
+
+    # Count unique companies
+    companies = set()
+    for role in history:
+        company = role.get("company", "").lower().strip()
+        if company:
+            companies.add(company)
+
+    if not companies:
+        return 1.0
+
+    avg_tenure_years = yoe / len(companies)
+
+    if avg_tenure_years < 1.0:
+        return 0.4   # Extreme job-hopper
+    elif avg_tenure_years < 1.5:
+        return 0.6   # Frequent switcher
+    elif avg_tenure_years < 2.0:
+        return 0.85  # Slight concern
+
+    return 1.0
+
+
+# =============================================================================
+# NEW JD-SPECIFIC SOFT FILTERS
+# =============================================================================
+
+def non_coding_architect_penalty(candidate: dict) -> float:
+    """
+    JD: If you are a senior engineer who hasn't written production code in the last
+    18 months because you've moved into 'architecture' or 'tech lead' roles...
+    """
+    history = candidate.get("career_history", [])
+    if not history:
+        return 1.0
+        
+    # Check the most recent role
+    current_role = sorted(history, key=lambda x: x.get("start_date", ""), reverse=True)[0]
+    title = current_role.get("title", "").lower()
+    dur = current_role.get("duration_months", 0)
+    
+    if ("architect" in title or "head of" in title or "vp" in title or "director" in title):
+        if dur > 18:
+            return 0.3  # Heavy penalty
+    return 1.0
+
+def langchain_wrapper_penalty(candidate: dict) -> float:
+    """
+    JD: If your 'AI experience' consists primarily of recent projects using 
+    LangChain to call OpenAI without pre-LLM-era ML production experience...
+    """
+    skills = [s.get("name", "").lower() for s in candidate.get("skills", [])]
+    
+    has_wrapper = any(w in sk for w in ["langchain", "openai", "llama_index"] for sk in skills)
+    has_fundamentals = any(f in sk for f in ["machine learning", "nlp", "information retrieval", "pytorch", "tensorflow"] for sk in skills)
+    
+    if has_wrapper and not has_fundamentals:
+        return 0.4
+    return 1.0
+
+def closed_source_penalty(candidate: dict) -> float:
+    """
+    JD: People whose work has been entirely on closed-source proprietary systems 
+    for 5+ years without external validation (papers, talks, open-source).
+    """
+    yoe = candidate.get("profile", {}).get("years_of_experience", 0)
+    github_score = candidate.get("redrob_signals", {}).get("github_activity_score", -1)
+    
+    if yoe > 5 and (github_score == -1 or github_score == 0):
+        return 0.8  # Slight penalty
+    return 1.0
+
+
+# =============================================================================
+# Behavioral Multiplier
 # =============================================================================
 
 def get_behavioral_multiplier(candidate: dict) -> float:
     """
-    Placeholder for Role 3's behavioral scoring logic.
-    Returns a basic heuristic so the pipeline can be tested end-to-end.
+    Compute a behavioral quality multiplier from the 23 Redrob signals.
+    Penalizes unresponsive and inactive candidates.
     """
     signals = candidate.get("redrob_signals", {})
     mult = 1.0
 
-    # Penalize very low recruiter response rate
+    # Penalize Ghosters (inactive > 180 days AND low response rate)
     response_rate = signals.get("recruiter_response_rate", 0.5)
-    if response_rate < 0.1:
-        mult *= 0.4
-    elif response_rate < 0.2:
-        mult *= 0.6
-
-    # Penalize inactive candidates (last_active_date > 6 months ago)
     last_active = signals.get("last_active_date")
+    days_inactive = 0
     if last_active:
         try:
             active_date = datetime.strptime(last_active, "%Y-%m-%d")
             days_inactive = (datetime.now() - active_date).days
-            if days_inactive > 180:
-                mult *= 0.5
-            elif days_inactive > 90:
-                mult *= 0.8
         except (ValueError, TypeError):
             pass
+
+    if days_inactive > 180 and response_rate < 0.10:
+        return 0.0  # Instant drop for Ghosters
+
+    # Normal activity penalties
+    if days_inactive > 180:
+        mult *= 0.5
+    elif days_inactive > 90:
+        mult *= 0.8
+
+    # Normal response rate penalties
+    if response_rate < 0.2:
+        mult *= 0.6
+        
+    # Profile Completeness
+    completeness = signals.get("profile_completeness_score", 50)
+    if completeness < 50:
+        mult *= 0.7
+    elif completeness > 90:
+        mult *= 1.05
+
+    # Reward open-to-work candidates
+    if signals.get("open_to_work_flag", False):
+        mult *= 1.05
+
+    # Interview completion rate
+    interview_rate = signals.get("interview_completion_rate", 0.5)
+    if interview_rate < 0.4:
+        mult *= 0.6
+    elif interview_rate > 0.85:
+        mult *= 1.12
+
+    # ==========================================
+    # POSITIVE BOOST LOGIC
+    # ==========================================
+    
+    # Boost 1: High demand (saved by recruiters)
+    saves = signals.get("saved_by_recruiters_30d", 0)
+    if saves > 10:
+        mult *= 1.15
+    elif saves > 0:
+        mult *= 1.05
+
+    # Boost 2: Active open-source/coding footprint
+    github_score = signals.get("github_activity_score", -1)
+    if github_score > 80:
+        mult *= 1.10
+    elif github_score > 40:
+        mult *= 1.05
+
+    # Boost 3: Highly complete and verified profile
+    if signals.get("verified_email", False) and signals.get("verified_phone", False):
+        mult *= 1.02
 
     return mult
 
@@ -351,8 +549,8 @@ def rank_candidates(
     if bm25_max > 0:
         bm25_scores = bm25_scores / bm25_max
 
-    # ── 4. Apply 5 scoring layers + combine ──────────────────────────────
-    print("Applying multi-layer scoring ...")
+    # ── 4. Apply 8 scoring layers + combine ──────────────────────────────
+    print("Applying multi-layer scoring (8 layers) ...")
     scored = []
     honeypot_count = 0
 
@@ -367,6 +565,15 @@ def rank_candidates(
         l_score = location_score(candidate)
         b_mult = get_behavioral_multiplier(candidate)
 
+        # New soft penalties from JD disqualifiers
+        research_pen = pure_researcher_penalty(candidate)
+        notice_pen = notice_period_penalty(candidate)
+        chaser_pen = title_chaser_penalty(candidate)
+        
+        arch_pen = non_coding_architect_penalty(candidate)
+        wrapper_pen = langchain_wrapper_penalty(candidate)
+        closed_pen = closed_source_penalty(candidate)
+
         f_score = compute_final_score(
             semantic_sim=semantic_scores[i],
             bm25_sim=bm25_scores[i],
@@ -377,6 +584,14 @@ def rank_candidates(
             location_sc=l_score,
             behavioral_mult=b_mult,
         )
+
+        # Apply soft penalties on top of the base score
+        f_score *= research_pen
+        f_score *= notice_pen
+        f_score *= chaser_pen
+        f_score *= arch_pen
+        f_score *= wrapper_pen
+        f_score *= closed_pen
 
         scored.append({
             "candidate_id": candidate["candidate_id"],
@@ -389,9 +604,13 @@ def rank_candidates(
             "experience_score": e_score,
             "location_score": l_score,
             "behavioral_mult": b_mult,
+            "research_penalty": research_pen,
+            "notice_penalty": notice_pen,
+            "chaser_penalty": chaser_pen,
             # Keep reference for reasoning generation (Role 3)
             "profile": candidate.get("profile", {}),
             "skills": candidate.get("skills", []),
+            "career_history": candidate.get("career_history", []),
             "redrob_signals": candidate.get("redrob_signals", {}),
         })
 
