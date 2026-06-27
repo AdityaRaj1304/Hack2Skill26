@@ -12,16 +12,10 @@ clean_pool.jsonl
 #   python -m src.ml.indexer candidates.jsonl
 # Or by running notebooks/role2_pipeline.ipynb on Google Colab
 # =============================================================================
-artifacts/*.faiss
-artifacts/*.pkl
-artifacts/*.npy
+
 *.zip
 bin_submission/
 
-# Also catch any artifacts accidentally left in project root
-*.faiss
-*.pkl
-*.npy
 
 # =============================================================================
 # Python
@@ -51,3 +45,6 @@ Thumbs.db
 # =============================================================================
 flaw_analysis.md
 implementation_plan.md
+hackathon_rules_conditions.md
+/tests
+/notebooks
